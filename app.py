@@ -1,3 +1,17 @@
+# Try to import and use pysqlite3-binary for ChromaDB compatibility on Streamlit Cloud
+try:
+    __import__('pysqlite3')
+    import sys
+    sys.modules['sqlite3'] = sys.modules.pop('pysqlite3')
+    # print("Successfully switched to pysqlite3-binary for sqlite3.") # Optional: for local debugging
+except ImportError:
+    # print("pysqlite3-binary not found, using system sqlite3.") # Optional: for local debugging
+    pass # If pysqlite3-binary is not there, it will fall back, error might persist
+except KeyError:
+    # print("sqlite3 module already replaced or pysqlite3 not correctly imported.") # Optional: for local debugging
+    pass
+
+
 # -*- coding: utf-8 -*-
 import streamlit as st
 import os
