@@ -1,0 +1,30 @@
+# Environment variables - VERY IMPORTANT to keep secrets out of GitHub
+.env
+
+# Python virtual environment folders (common names)
+.venv/
+venv/
+ENV/
+env/
+*/site-packages/
+
+# Python cache files and compiled files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# IDE and editor specific configuration files (examples)
+.vscode/
+.idea/
+*.swp
+
+# Streamlit specific (optional, but good practice for local config)
+.streamlit/
+
+# Operating System specific files (common on macOS and Windows)
+.DS_Store
+Thumbs.db
+
+# Any local report files you might generate and don't want to commit
+*.md
