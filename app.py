@@ -39,414 +39,426 @@ except ImportError:
 # --- App Configuration ---
 st.set_page_config(
     page_title="PoliScanSight Bot 🕵️", 
-    page_icon="📊", 
+    page_icon="📊",                   
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
+# --- Global Variables & Helper Functions ---
+search_tool_instance = None 
+
 # --- Password Protection ---
 def check_password():
-    """Returns `True` if the user had the correct password."""
-    # Correct password fetched from environment variable
+    """Returns `True` if the user has entered the correct password."""
+    if "password_correct" not in st.session_state:
+        st.session_state.password_correct = False
+
     correct_password = os.environ.get("APP_PASSWORD")
 
-    # If no password is set in environment, deny access or allow for local dev
     if not correct_password:
-        # For local development, you might want to bypass this
-        # return True # Uncomment for local dev if no password is set
-        st.error("🔒 Password not configured for this application. Access denied.")
-        st.stop()
+        st.error("🔒 APP_PASSWORD environment variable not set. Please configure it in your .env file or system environment.")
+        st.info("Create a `.env` file in the app directory with `APP_PASSWORD=\"your_password_here\"`")
         return False
 
-    if "password_correct" not in st.session_state:
-        # First run, show input for password.
-        st.session_state.password_correct = False # Initialize
-        password_placeholder = st.empty()
-        password = password_placeholder.text_input("🔑 Enter Password", type="password", key="app_password_input")
-        
-        submit_button_placeholder = st.empty()
-        if submit_button_placeholder.button("Submit", key="password_submit"):
-            if password == correct_password:
-                st.session_state.password_correct = True
-                password_placeholder.empty() # Clear password input
-                submit_button_placeholder.empty() # Clear submit button
-                st.rerun() # Rerun to clear password elements and show app
-            else:
-                st.error("🚫 Incorrect password. Please try again.")
-                st.session_state.password_correct = False
-        else: # Only show input and button if not submitted yet
-             st.info("🔐 This application is password protected.")
-             st.stop() # Stop execution until password is submitted
-        return False # Ensure app doesn't load until password is correct
-        
-    elif not st.session_state.password_correct:
-        # Password not correct, show input again (should be handled by rerun logic)
-        password_placeholder = st.empty()
-        password = password_placeholder.text_input("🔑 Enter Password", type="password", key="app_password_input_retry")
-        
-        submit_button_placeholder = st.empty()
-        if submit_button_placeholder.button("Submit", key="password_submit_retry"):
-            if password == correct_password:
-                st.session_state.password_correct = True
-                password_placeholder.empty()
-                submit_button_placeholder.empty()
-                st.rerun()
-            else:
-                st.error("🚫 Incorrect password. Please try again.")
-                st.session_state.password_correct = False
+    if st.session_state.password_correct:
+        return True
+
+    password_placeholder = st.empty()
+    password_attempt = password_placeholder.text_input("🔑 Enter App Password", type="password", key="password_input_main_v5") 
+
+    if password_attempt:
+        if password_attempt == correct_password:
+            st.session_state.password_correct = True
+            password_placeholder.empty() 
+            st.rerun() 
         else:
-            st.info("🔐 This application is password protected.")
-            st.stop()
-        return False
-    
-    return True
+            st.error("😕 Incorrect password. Please try again.")
+            st.session_state.password_correct = False
+    else:
+        st.info("🔐 This application is password protected.")
 
+    return st.session_state.password_correct
 
-# --- Tool and LLM Initialization ---
-def initialize_serper_tool(api_key=None):
-    """Initializes the SerperDevTool with the given API key."""
+# --- Core Logic Functions ---
+def initialize_serper_tool(api_key):
+    global search_tool_instance
     if api_key:
         os.environ["SERPER_API_KEY"] = api_key
-        return SerperDevTool()
-    elif os.environ.get("SERPER_API_KEY"):
-        # print("Serper API Key found in environment variables.") # For debugging
-        return SerperDevTool()
+        try:
+            search_tool_instance = SerperDevTool()
+            st.session_state.serper_initialized = True
+            return True
+        except Exception as e:
+            st.error(f"SerperDevTool Error: {e}") 
+            search_tool_instance = None
+            st.session_state.serper_initialized = False
+            return False
     else:
-        # st.warning("⚠️ Serper API Key not provided. Web search capabilities will be disabled. Validation and analysis quality may be affected.")
-        return None
+        search_tool_instance = None
+        st.session_state.serper_initialized = False
+        return False
 
-def create_llm(llm_choice, openai_api_key_value=None):
-    """Creates and returns the selected LLM instance."""
-    if llm_choice == "GPT-4o-mini":
+def create_llm(llm_choice, openai_api_key_value):
+    if llm_choice == "GPT-4o-mini (OpenAI)":
         if not ChatOpenAI:
-            st.error("❌ OpenAI library (langchain_openai) is not installed. Please install it to use GPT models.")
+            st.error("langchain_openai is not available.")
             return None
-        if not openai_api_key_value and not os.environ.get("OPENAI_API_KEY"):
-            st.error("❌ OpenAI API Key is required for GPT-4o-mini. Please provide it in the sidebar or set OPENAI_API_KEY environment variable.")
+        if not openai_api_key_value:
+            st.error("OpenAI API Key is required for GPT-4o-mini. Please provide it in the sidebar under 'API Keys & Web Search Setup'.")
             return None
-        api_key_to_use = openai_api_key_value or os.environ.get("OPENAI_API_KEY")
-        return ChatOpenAI(model_name="gpt-4o-mini", temperature=0.7, api_key=api_key_to_use)
-    
-    elif llm_choice == "Llama3.1 (Ollama)":
-        if not Ollama:
-            st.error("❌ Ollama library (langchain_community.llms) is not installed. Please install it to use Ollama models.")
+        os.environ["OPENAI_API_KEY"] = openai_api_key_value
+        return ChatOpenAI(model="gpt-4o-mini", temperature=0.5, openai_api_key=openai_api_key_value)
+    elif llm_choice == "Llama3.1 (Local Ollama)":
+        if Ollama is None:
+            st.error("Ollama from langchain_community.llms is not available.")
             return None
         try:
-            # Check if Ollama server is accessible by trying to list models or a similar lightweight call
-            # This is a simplified check; a more robust check might involve an actual API call
-            # For now, we assume if Ollama is chosen, the user has it running.
-            return Ollama(model="llama3.1", base_url=os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434"))
+            return Ollama(model="llama3.1")
         except Exception as e:
-            st.error(f"❌ Could not connect to Ollama. Ensure Ollama is running and accessible. Error: {e}")
+            st.error(f"Error initializing Ollama: {e}. Ensure Ollama server is running.")
             return None
     return None
 
-# --- Validator Agent and Task ---
-def create_validator_agent_and_task(entity_name, llm, serper_tool):
-    """Creates a validator agent and its task to check if the entity is political."""
-    validator_agent = Agent(
-        role="Political Entity Validator",
-        goal=f"""Your primary goal is to determine if the entity '{entity_name}' is a known political figure (e.g., minister, MP, MLA, party leader), a registered political party, or a significant political organization, with a strong focus on the Indian political landscape unless the name clearly indicates otherwise.
-Search the web for evidence of political roles, affiliations, or activities.
-If clear evidence of political status is found, respond with the exact string 'POLITICAL'.
-If the entity is a common name with no clear, prominent political affiliation, or if it's clearly a non-political entity (e.g., a company, a fictional character, a general concept), respond with the exact string 'NON_POLITICAL'.
-If the search is ambiguous but leans towards non-political or unknown, also respond 'NON_POLITICAL'.""",
-        backstory="You are an expert in identifying political entities through web research. You are precise and only confirm political status if there is clear evidence. You provide concise, direct answers as specified.",
-        llm=llm,
-        tools=[serper_tool],
-        allow_delegation=False,
-        verbose=True, # Set to False for less console output in production
-        max_iter=3 # Limit iterations for validation
+def create_political_agents(political_entity_name, llm):
+    global search_tool_instance 
+    agent_tools_list = []
+    if search_tool_instance and st.session_state.get('serper_initialized', False):
+        agent_tools_list.append(search_tool_instance)
+
+    activity_researcher = Agent(
+        role="Political Affairs & Community Impact Investigator",
+        goal=f"Conduct an in-depth investigation into {political_entity_name}'s recent (user-defined analysis period) political activities, "
+             f"new schemes, any significant controversies (with their direct and indirect impact on image/perception), "
+             f"and the specific, detailed impact of these on local communities or caste groups. "
+             f"For key factual claims, new schemes, and significant controversies, if a direct and relevant public URL (e.g., from a reputable news source or official government page) "
+             f"is found that substantiates the information, include it. Prioritize quality and direct relevance of URLs. "
+             f"Compile any collected URLs as a list at the end of your findings for this task.",
+        backstory="You are a highly skilled investigative journalist specializing in state-level politics and socio-economic impacts. "
+                  "You uncover not just facts, but also their nuanced implications. You are meticulous about verifying information and strive to provide relevant source URLs for critical information when available. "
+                  "Your reports on community impact are expected to be substantive.",
+        verbose=True, allow_delegation=False, tools=agent_tools_list, llm=llm, max_iter=20
     )
 
-    validation_task = Task(
-        description=f"""Search the web for information about '{entity_name}'.
-Determine if '{entity_name}' is a recognized political leader, political party, or a significant political organization, primarily within the Indian context unless the name strongly suggests otherwise.
-Your final answer MUST be a single string: either 'POLITICAL' or 'NON_POLITICAL'. Do not provide any other explanation or text.""",
-        expected_output="A single string: 'POLITICAL' or 'NON_POLITICAL'.",
-        agent=validator_agent,
-        # human_input=False # No human input for this automated task
-    )
-    return validator_agent, validation_task
-
-# --- Political Analysis Agents and Tasks ---
-def create_political_agents(political_entity_name, llm, serper_tool):
-    """Creates the set of AI agents for political analysis."""
-    political_affairs_investigator = Agent(
-        role=f"Political Affairs & Community Impact Investigator for {political_entity_name}",
-        goal=f"Investigate and detail {political_entity_name}'s recent (last 3-6 months unless specified otherwise) political activities, new schemes or policies launched, involvement in any significant controversies, and their perceived impact on local communities and public welfare. Identify specific examples and, where possible, URLs of news articles or official sources supporting these findings.",
-        backstory=f"You are a seasoned investigative journalist specializing in Indian political dynamics and governance. You have a keen eye for detail, a knack for uncovering factual information from diverse online sources, and a commitment to objective reporting on {political_entity_name}.",
-        llm=llm,
-        tools=[serper_tool],
-        allow_delegation=False,
-        verbose=True,
-        max_iter=5 
+    landscape_monitor = Agent(
+        role="State Political Landscape & Competitor Strategy Analyst",
+        goal=f"Monitor and deeply analyze the significant activities, underlying STRATEGIES, and political campaigns of ALL major political parties "
+             f"and their key leaders in the state (relevant to {political_entity_name}) during the user-defined analysis period. "
+             f"Focus on their stated aims for state betterment, their actual methods for increasing vote share (e.g., narratives, target segments), "
+             f"and analyze their successes or failures. "
+             f"If direct public URLs from reputable sources are found for reported activities or strategic claims, include them. "
+             f"Compile any collected URLs as a list at the end of your findings for this task.",
+        backstory="An expert political strategist analyzing state-level competitive dynamics. You don't just list events; you dissect the strategies, "
+                  "target audiences, and effectiveness of all major political players. You aim to source key strategic claims with relevant URLs when possible.",
+        verbose=True, allow_delegation=False, tools=agent_tools_list, llm=llm, max_iter=15
     )
 
-    state_political_landscape_analyst = Agent(
-        role=f"State-Level Political Landscape & Competitor Strategy Analyst (Context: {political_entity_name})",
-        goal=f"Analyze the current political landscape in the state/region relevant to {political_entity_name}. Identify key competing political parties and figures, their recent strategic moves, major campaigns, public reception, and any notable successes or failures. Focus on how these dynamics might affect {political_entity_name}. Identify specific examples and, where possible, URLs of news articles or official sources supporting these findings.",
-        backstory=f"You are a political strategist with deep expertise in Indian state-level politics. You excel at dissecting competitor strategies, understanding voter sentiment shifts, and identifying emerging political trends that could impact {political_entity_name}.",
-        llm=llm,
-        tools=[serper_tool],
-        allow_delegation=False,
-        verbose=True,
-        max_iter=5
-    )
-    
-    public_sentiment_analyst = Agent(
-        role=f"Public Sentiment & Narrative Analyst for {political_entity_name}",
-        goal=f"Analyze the prevailing public sentiment (positive, negative, neutral) towards {political_entity_name} over a specified recent period and compare it with a defined earlier period if data is available. Identify key themes, narratives, and events shaping this sentiment. Pinpoint the primary drivers for any significant shifts in public opinion. Identify specific examples and, where possible, URLs of news articles, social media trend discussions (if findable via web search), or official sources supporting these findings.",
-        backstory=f"You are a data-driven media analyst specializing in tracking and interpreting public opinion trends related to political entities in India. You are adept at sifting through online information to gauge sentiment and understand the 'why' behind it for {political_entity_name}.",
-        llm=llm,
-        tools=[serper_tool],
-        allow_delegation=False,
-        verbose=True,
-        max_iter=5
+    sentiment_analyzer = Agent(
+        role="Public Sentiment & Narrative Analyst",
+        goal=f"Conduct a DETAILED quantitative and qualitative sentiment analysis for {political_entity_name} for the user-defined analysis period, "
+             f"and compare it with sentiment from 5 to 10 days BEFORE the start of that analysis period. "
+             f"You MUST output: "
+             f"1) Current sentiment breakdown (Positive: X%, Negative: Y%, Neutral: Z%). "
+             f"2) Past sentiment breakdown (Positive: A%, Negative: B%, Neutral: C%). "
+             f"3) Explicit trend analysis (e.g., 'Negative sentiment surged by K percentage points from B% to Y%'). "
+             f"4) Identify 1-2 KEY THEMES or prominent HASHTAGS (e.g., 'MissingCM' if verifiable from data) driving the current sentiment. "
+             f"5) Clearly explain reasons for any shifts in simple terms. "
+             f"Use the search tool effectively for specific date ranges. If URLs for sentiment data/reports or articles directly reflecting these themes are found, include them. "
+             f"Compile any collected URLs as a list at the end of your findings.",
+        backstory="A specialist in dissecting public opinion. You go beyond surface-level sentiment, providing precise quantitative breakdowns, "
+                  "identifying trends, and uncovering the core narratives and events that shape public perception. You try to link sentiment drivers to citable sources if available.",
+        verbose=True, allow_delegation=False, tools=agent_tools_list, llm=llm, max_iter=15
     )
 
-    chief_political_strategist = Agent(
-        role=f"Chief Political Strategist & Report Architect for {political_entity_name}",
-        goal=f"""Synthesize all gathered intelligence from the Political Affairs Investigator, State Landscape Analyst, and Public Sentiment Analyst into a comprehensive, coherent, and actionable strategic advisory report for {political_entity_name}.
-The report should be structured, easy to understand (simple English), and cover:
-1.  Executive Summary of {political_entity_name}'s current standing.
-2.  Detailed analysis of {political_entity_name}'s recent activities and community impact.
-3.  Assessment of the state-level political landscape and competitor strategies.
-4.  In-depth look at public sentiment trends and their drivers.
-5.  SWOT Analysis (Strengths, Weaknesses, Opportunities, Threats) for {political_entity_name}.
-6.  Actionable strategic recommendations for {political_entity_name} to enhance their political standing, address challenges, and capitalize on opportunities.
-7.  A consolidated list of all unique source URLs provided by other agents, formatted plainly one URL per line. Ensure no duplicate URLs.
-Your final output is ONLY this comprehensive report.""",
-        backstory=f"You are a highly experienced Chief Political Strategist, renowned for your ability to translate complex political intelligence into clear, actionable strategies. You are crafting a vital advisory document for {political_entity_name}.",
-        llm=llm,
-        # No tools for the strategist, it synthesizes from other agents' work.
-        allow_delegation=True, # Can delegate back to other agents if clarification is needed, though tasks are sequential.
-        verbose=True,
-        max_iter=5 
+    report_writer = Agent(
+        role="Chief Political Strategist & Report Architect",
+        goal=f"Compile ALL findings from the other agents into a single, comprehensive, and strategically insightful report "
+             f"about {political_entity_name}, following the detailed 7-section political analysis prompt. "
+             f"The ENTIRE content of the report MUST be written in **simple, clear English** but must retain the analytical depth and detail requested. "
+             f"Develop insightful and actionable 'Strategic Recommendations' (Section VI) with detailed justifications, similar in depth to prior examples of good recommendations. "
+             f"Compile ALL unique and relevant URLs provided by other agents into a final 'Compiled Reference List' (Section VII). "
+             f"Each URL in this list should be on a new line, formatted clearly as a plain URL (e.g., https://www.example.com/article) without any surrounding Markdown link syntax, as Streamlit will render these. " # Added instruction for plain URL formatting
+             f"Ensure these URLs appear to be valid and directly support key information. Do not include URLs inline within Sections I-V.",
+        backstory="A seasoned political strategist and master communicator. You transform complex intelligence into clear, actionable advice. "
+                  "You excel at crafting comprehensive reports in simple language that directly address every part of a client's request, providing strategic depth and ensuring all relevant, verifiable sources are meticulously compiled at the end.",
+        verbose=True, allow_delegation=False, llm=llm, max_iter=15
     )
-    return political_affairs_investigator, state_political_landscape_analyst, public_sentiment_analyst, chief_political_strategist
+    return [activity_researcher, landscape_monitor, sentiment_analyzer, report_writer]
 
+def create_political_tasks(political_entity_name, agents, start_date_str, current_date_str, past_sentiment_start_str, past_sentiment_end_str):
+    activity_researcher, landscape_monitor, sentiment_analyzer, report_writer = agents
+    analysis_period_str = f"between {start_date_str} and {current_date_str}"
+    past_sentiment_period_str = f"between {past_sentiment_start_str} and {past_sentiment_end_str}"
 
-def create_political_tasks(political_entity_name, agents, start_date, end_date, comparison_start_date, comparison_end_date):
-    """Creates the set of tasks for the political analysis agents."""
-    (political_affairs_investigator, state_political_landscape_analyst, 
-     public_sentiment_analyst, chief_political_strategist) = agents
-
-    task1_investigate = Task(
-        description=f"""Investigate and report on the recent political activities, new schemes or policies launched, involvement in significant controversies, and the perceived community impact of '{political_entity_name}'.
-Focus strictly on the period from {start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}.
-Provide specific examples and find relevant URLs from news articles or official sources to support your findings.
-Your output should be a detailed report section covering these aspects for {political_entity_name}.""",
-        expected_output=f"A detailed report section on {political_entity_name}'s activities, schemes, controversies, and community impact for the specified period, including supporting URLs.",
-        agent=political_affairs_investigator,
-        # human_input=False
+    date_filter_instruction_main_period = (
+        f"Your research MUST focus on information published or relevant strictly {analysis_period_str}. "
+        f"When using the web search tool, you MUST craft your queries to find information ONLY from this period. For example, "
+        f"include terms like 'news after:{start_date_str} before:{current_date_str}' or similar specific date restrictions in your search query string provided to the tool."
+    )
+    date_filter_instruction_past_sentiment = (
+         f"When using the web search tool for past sentiment context, you MUST craft your queries to find information ONLY from the period {past_sentiment_period_str}. For example, "
+        f"include terms like 'news after:{past_sentiment_start_str} before:{past_sentiment_end_str}' in your search query string."
+    )
+    url_collection_instruction_agent = (
+        "If you find direct and relevant public URLs (e.g., from reputable news sources or official pages) that substantiate key factual claims, "
+        "please collect them. At the end of your response for THIS TASK, provide a consolidated list of these high-quality URLs under a clear heading like 'Collected URLs for this task:'. "
+        "Do not invent URLs or use placeholders if a suitable source is not found for a specific detail."
     )
 
-    task2_analyze_landscape = Task(
-        description=f"""Analyze the current political landscape in the state/region relevant to '{political_entity_name}'.
-Identify key competing political parties and figures, their recent strategic moves, major campaigns, public reception, and any notable successes or failures.
-Focus strictly on the period from {start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}.
-Explain how these dynamics might affect '{political_entity_name}'.
-Provide specific examples and find relevant URLs from news articles or official sources.
-Your output should be a detailed report section covering these aspects.""",
-        expected_output="A detailed report section on the state-level political landscape, competitor strategies, and their potential impact on the entity, including supporting URLs.",
-        agent=state_political_landscape_analyst,
-        # human_input=False
+    task1_research_activities_community = Task(
+        description=f"**Primary Goal for {political_entity_name}**: Conduct an in-depth investigation for the period {analysis_period_str}. {url_collection_instruction_agent}\\n"
+                    f"   **Search Instructions**: {date_filter_instruction_main_period}\\n"
+                    f"   **Specific Areas to Cover**:\\n"
+                    f"   1.  **Section I - Recent Political Activities & Scheme Launches**: Detail the nature of each activity (rallies, policy announcements etc.), key messages conveyed, and any new schemes (name, purpose, beneficiaries, potential impact). Be specific and provide details.\\n"
+                    f"   2.  **Section II - Controversies Involving {political_entity_name}**: Describe each significant controversy, identify key individuals/aspects, analyze media coverage intensity and general tone. Most importantly, provide a detailed analysis of the direct and indirect impact of these controversies on {political_entity_name}'s image and public perception.\\n"
+                    f"   3.  **Section III - Community and Caste-Specific Impact Analysis**: Provide a substantive analysis (not just a brief mention) if and how specific communities or caste groups are reportedly being affected (positively or negatively) by {political_entity_name}'s recent activities. Also, research if opposition party campaigns are reportedly benefiting or targeting these specific groups. If specific data or strong anecdotal evidence is found, highlight it. If little information is found, state that clearly.",
+        agent=activity_researcher,
+        expected_output=f"A detailed, multi-part report covering Sections I, II, and III of the main political analysis prompt for {political_entity_name} specifically for the period {analysis_period_str}. "
+                        f"The content must be factual, deeply analytical (especially for controversy impact and community effects), and written clearly. "
+                        f"The output for this task should conclude with a list of relevant source URLs under the heading 'Collected URLs for this task:', if any were found.",
+        async_execution=False
     )
-
+    task2_monitor_landscape = Task(
+        description=f"**Primary Goal**: Monitor and analyze the broader political landscape in the state of {political_entity_name} for the period {analysis_period_str}. {url_collection_instruction_agent}\\n"
+                    f"   **Search Instructions**: {date_filter_instruction_main_period}\\n"
+                    f"   **Specific Areas to Cover (Section V of final report)**:\\n"
+                    f"   1. Report on significant activities of **ALL major political parties** and their key leaders in the state.\\n"
+                    f"   2. For EACH major party, provide a detailed analysis of their: \\n"
+                    f"      a. Recent public engagements, announcements, or policy stances.\\n"
+                    f"      b. **Underlying STRATEGIES and specific CAMPAIGNS** they are visibly adopting/running aimed at i) the betterment of the state (e.g., development initiatives, governance reforms) AND ii) increasing their vote share or public support (e.g., outreach programs, narrative building, target voter segments, key issues highlighted).\\n"
+                    f"      c. Key messages being pushed to the public.\\n"
+                    f"      d. Any notable successes or failures in their recent strategic efforts.",
+        agent=landscape_monitor,
+        expected_output=f"A comprehensive and strategic analysis of the activities and positioning of ALL major political players in the state for {analysis_period_str}, aligning with Section V of the main political analysis prompt. "
+                        f"The analysis for each party should go beyond listing events and delve into their strategies and campaign effectiveness. "
+                        f"The output for this task should conclude with a list of relevant source URLs under the heading 'Collected URLs for this task:', if any were found.",
+        context=[task1_research_activities_community],
+        async_execution=False
+    )
     task3_analyze_sentiment = Task(
-        description=f"""Analyze the prevailing public sentiment (e.g., positive, negative, neutral) towards '{political_entity_name}'.
-Focus on sentiment during the primary period: {start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}.
-Also, research and compare this with the sentiment during a past reference period: {comparison_start_date.strftime('%Y-%m-%d')} to {comparison_end_date.strftime('%Y-%m-%d')}.
-Identify key themes, narratives, and specific events shaping public sentiment in both periods. Pinpoint primary drivers for any significant shifts in opinion between these periods.
-Provide specific examples and find relevant URLs (news, social media trends if possible via web search) to support your analysis.
-Your output should be a detailed report section on public sentiment trends and drivers.""",
-        expected_output="A detailed report section on public sentiment analysis, comparison between periods, key themes, drivers of sentiment shifts, including supporting URLs.",
-        agent=public_sentiment_analyst,
-        # human_input=False
+        description=f"**Primary Goal**: Conduct a DETAILED public sentiment analysis for {political_entity_name}.\\n"
+                    f"   **Current Sentiment Period**: Analyze sentiment for **{analysis_period_str}**. {url_collection_instruction_agent.replace('key factual claims, activities, and claims', 'articles or data points specifically used for sentiment context during this period')}\\n"
+                    f"   **Past Sentiment Period for Comparison**: Analyze sentiment for **{past_sentiment_period_str}** (5-10 days before {start_date_str}). {date_filter_instruction_past_sentiment} {url_collection_instruction_agent.replace('key factual claims, activities, and claims', 'articles or data points specifically used for sentiment context during this past period')}\\n"
+                    f"   **Required Output Details (Section IV of final report)**:\\n"
+                    f"   1.  **Current Sentiment ({analysis_period_str})**: Provide breakdown: Positive: X%, Negative: Y%, Neutral: Z%.\\n"
+                    f"   2.  **Past Sentiment ({past_sentiment_period_str})**: Provide breakdown: Positive: A%, Negative: B%, Neutral: C%.\\n"
+                    f"   3.  **Sentiment Trend Analysis**: Explicitly state the trend. For example: 'Positive sentiment changed by K percentage points from A% (in {past_sentiment_period_str}) to X% (in {analysis_period_str}). Negative sentiment changed by M percentage points from B% to Y%.' Calculate and state these changes clearly.\\n"
+                    f"   4.  **Key Themes/Hashtags**: Identify 1-2 specific, verifiable key themes or prominent hashtags (e.g., 'MissingCM' if data supports this for the current period) that are significantly driving the current sentiment or trends.\\n"
+                    f"   5.  **Reasons for Sentiment Shifts**: Explain the reasons for any observed sentiment shifts in simple terms, linking them directly to specific recent activities, controversies, community impacts, or competitor actions from the respective periods analyzed.",
+        agent=sentiment_analyzer,
+        context=[task1_research_activities_community, task2_monitor_landscape],
+        expected_output=f"A highly detailed sentiment analysis report for {political_entity_name}, precisely following the structure for Section IV of the main political analysis prompt, including:\\n"
+                        f"- Current period ({analysis_period_str}) sentiment breakdown (Positive %, Negative %, Neutral %).\\n"
+                        f"- Past period ({past_sentiment_period_str}) sentiment breakdown (Positive %, Negative %, Neutral %).\\n"
+                        f"- Explicit trend analysis detailing percentage point changes between the two periods for each sentiment category.\\n"
+                        f"- Identification of 1-2 key themes or prominent, verifiable hashtags driving current sentiment.\\n"
+                        f"- Clear, evidence-based reasons for any sentiment shifts.\\n"
+                        f"- The output for this task should conclude with a list of relevant source URLs under 'Collected URLs for this task:', if any were found for sentiment context.",
+        async_execution=False
     )
-    
-    task4_compile_report = Task(
-        description=f"""Compile all the information gathered by the other agents regarding '{political_entity_name}' for the analysis period {start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}.
-Structure this into a comprehensive 7-section strategic advisory report as outlined in your goal (Executive Summary, Recent Activities, State Landscape, Public Sentiment, SWOT, Strategic Recommendations, Consolidated URLs).
-Write the report in simple, accessible English. Ensure all sections are well-developed.
-The final section must be a plain list of all unique source URLs gathered by all agents, with each URL on a new line. Do not include any other text in this URL list section.
-Your final output is ONLY this complete report.""",
-        expected_output="A comprehensive 7-section strategic advisory report, including a SWOT analysis, actionable recommendations, and a consolidated list of unique source URLs.",
-        agent=chief_political_strategist,
-        context=[task1_investigate, task2_analyze_landscape, task3_analyze_sentiment], # Depends on the output of other tasks
-        # human_input=False 
+    task4_compile_final_report = Task(
+        description=f"**Primary Goal**: Compile all detailed findings from Task 1, Task 2, and Task 3 "
+                    f"into a single, final, comprehensive report. The final report **MUST be written in simple, clear English** but must retain all the requested analytical depth and detail. "
+                    f"Adhere strictly to the 7-section structure from the main political analysis prompt. The report title should be professional, like 'Comprehensive Political Analysis for {political_entity_name}', and specify the analysis period: {analysis_period_str}.\\n"
+                    f"   **Section VI - Strategic Recommendations**: Develop insightful, highly specific, and actionable recommendations for {political_entity_name}. These should directly address the findings from all preceding sections. Aim for recommendations with depth and clear rationale.\\n"
+                    f"   **Section VII - Compiled Reference List**: Meticulously compile ALL unique and seemingly valid URLs provided by Task 1, Task 2, and Task 3 into a single, clean, numbered list. "
+                    f"Each URL in this list should be presented as a plain URL (e.g., https://www.example.com/article) without any surrounding Markdown link syntax. " # Added instruction for plain URL formatting
+                    f"**NO URLs should appear inline within Sections I-V of the main report body.** If no URLs were provided by other agents, state that clearly in this section.",
+        agent=report_writer,
+        context=[task1_research_activities_community, task2_monitor_landscape, task3_analyze_sentiment],
+        expected_output=f"A final, comprehensive report on {political_entity_name} (analysis period: {analysis_period_str}) written in **simple, clear English**, "
+                        f"precisely following the 7-section structure. "
+                        f"Section VII must contain the consolidated URL list (formatted as plain URLs, each on a new line) or a note if no relevant URLs were found. "
+                        f"The main title should be 'Comprehensive Political Analysis & Strategic Advisory: {political_entity_name} (Analysis Period: {start_date_str} to {current_date_str})'.",
+        async_execution=False
     )
-    return [task1_investigate, task2_analyze_landscape, task3_analyze_sentiment, task4_compile_report]
+    return [task1_research_activities_community, task2_monitor_landscape, task3_analyze_sentiment, task4_compile_final_report]
 
-
-# --- Main Application Logic ---
+# --- Main Streamlit App ---
 def run_app():
-    """Runs the Streamlit application."""
     st.title("🕵️ PoliScanSight Bot")
-    st.markdown("""
-    Welcome to PoliScanSight Bot! This AI-powered tool helps you analyze a political entity in India.
-    Provide the entity's name, analysis period, and select your preferred AI model.
-    The bot will generate a report covering recent activities, competitor landscape, public sentiment, and strategic recommendations.
-    """)
+    st.markdown("Welcome to **PoliScanSight Bot** 🚀: Your one-stop AI for analyzing recent political activities, controversies, sentiment trends, and strategic suggestions for any Indian political entity from your chosen date.")
     st.markdown("---")
 
-    # Initialize session state variables if they don't exist
-    if "analysis_result" not in st.session_state:
-        st.session_state.analysis_result = None
-    if "analysis_in_progress" not in st.session_state:
-        st.session_state.analysis_in_progress = False
-    if "entity_name_for_report" not in st.session_state:
-        st.session_state.entity_name_for_report = ""
-    if "start_date_for_report" not in st.session_state:
-        st.session_state.start_date_for_report = date.today() - timedelta(days=30)
-
-
     with st.sidebar:
-        st.header("⚙️ Configuration")
-        
-        entity_name_input = st.text_input("👤 Political Entity Name (e.g., Person or Party)", 
-                                          help="Enter the full name of the political leader or party you want to analyze.",
-                                          value=st.session_state.get("last_entity_name", ""))
-        
-        # Analysis period
-        today = date.today()
-        default_start_date = today - timedelta(days=30) # Default to last 30 days
-        
+        st.subheader("📊 Analysis Inputs")
+        entity_name_input = st.text_input(
+            "👤 Political Entity Name", placeholder="e.g., M.K. Stalin, DMK Party",
+            help="Enter the political leader, party, or influencer."
+        )
+        default_start_date = date.today() - timedelta(days=7)
         start_date_input = st.date_input(
-            "🗓️ Analysis Start Date",
-            value=st.session_state.get("last_start_date", default_start_date),
-            min_value=today - timedelta(days=365*3), # Max 3 years back
-            max_value=today - timedelta(days=1), # Must be at least yesterday
-            help="The beginning of the period for analysis. Ends today."
+            "🗓️ Analysis Start Date", value=default_start_date, max_value=date.today(),
+            help="Select start date. End date is today."
         )
         
+        st.subheader("🧠 LLM Selection")
         llm_options = []
-        if ChatOpenAI:
-            llm_options.append("GPT-4o-mini")
-        if Ollama:
-            llm_options.append("Llama3.1 (Ollama)")
-
+        if ChatOpenAI: llm_options.append("GPT-4o-mini (OpenAI)")
+        if Ollama: llm_options.append("Llama3.1 (Local Ollama)")
         if not llm_options:
-            st.error("No LLMs available. Please ensure relevant libraries are installed (OpenAI, Ollama).")
-            st.stop()
-            
-        llm_choice = st.selectbox("🤖 Select LLM", options=llm_options, 
-                                  help="Choose the AI model to power the analysis.")
-
-        with st.expander("🔑 API Keys & Advanced Settings"):
-            openai_api_key_value = st.text_input("OpenAI API Key", type="password", 
-                                                 help="Required if using GPT models. Leave blank if set as environment variable.",
-                                                 value=os.environ.get("OPENAI_API_KEY", ""))
-            serper_api_key_value = st.text_input("Serper API Key (for Web Search)", type="password", 
-                                                 help="Required for web search capabilities. Leave blank if set as environment variable.",
-                                                 value=os.environ.get("SERPER_API_KEY", ""))
-            # ollama_base_url_value = st.text_input("Ollama Base URL", 
-            #                                     value=os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434"),
-            #                                     help="URL for your Ollama server if not default.")
-            # if ollama_base_url_value:
-            #     os.environ["OLLAMA_BASE_URL"] = ollama_base_url_value
-
-
-        if st.button("🚀 Generate Report", use_container_width=True, type="primary", disabled=st.session_state.analysis_in_progress):
-            if not entity_name_input:
-                st.error("❌ Please enter a Political Entity Name.")
-            elif not start_date_input:
-                st.error("❌ Please select an Analysis Start Date.")
-            elif start_date_input >= date.today():
-                st.error("❌ Analysis Start Date must be in the past.")
-            else:
-                st.session_state.analysis_in_progress = True
-                st.session_state.analysis_result = None # Clear previous results
-                st.session_state.entity_name_for_report = entity_name_input
-                st.session_state.start_date_for_report = start_date_input
-                st.session_state.last_entity_name = entity_name_input # Remember for next time
-                st.session_state.last_start_date = start_date_input  # Remember for next time
-                st.rerun() # Rerun to show progress indicator and disable button
-
-    # --- Main Content Area ---
-    if st.session_state.analysis_in_progress:
-        with st.spinner(f"🔄 Analyzing '{st.session_state.entity_name_for_report}'... This may take a few minutes."):
-            # Initialize LLM and Tools
-            llm = create_llm(llm_choice, openai_api_key_value if llm_choice == "GPT-4o-mini" else None)
-            serper_tool = initialize_serper_tool(serper_api_key_value)
-
-            if not llm:
-                st.error("Failed to initialize the LLM. Please check your configuration and API keys.")
-                st.session_state.analysis_in_progress = False
-                st.rerun()
-                return # Stop execution
-
-            if not serper_tool:
-                st.error("🚫 Serper API Key for web search is not configured or is invalid. Cannot perform entity validation or detailed political analysis. Please provide the API key.")
-                st.session_state.analysis_in_progress = False
-                st.rerun()
-                return # Stop execution
-
-            # 1. Validate Entity
-            validation_status_placeholder = st.empty()
-            validation_status_placeholder.info(f"🔍 Validating '{st.session_state.entity_name_for_report}' as a political entity...")
-            
-            validator_agent, validation_task = create_validator_agent_and_task(st.session_state.entity_name_for_report, llm, serper_tool)
-            validation_crew = Crew(
-                agents=[validator_agent],
-                tasks=[validation_task],
-                verbose=0, # 0 for less output on Streamlit page, 1 or 2 for console debugging
-                process=Process.sequential,
-                memory=False,
+            st.error("No LLMs available! Check Langchain installations.")
+            selected_llm = None
+        else:
+            selected_llm = st.selectbox(
+                "Choose Language Model", llm_options,
+                help="Select the LLM. Ensure local Ollama server is running if selected."
             )
-            try:
-                validation_result = validation_crew.kickoff()
-                validation_status_placeholder.empty() # Clear validation message
-
-                if validation_result and "POLITICAL" in validation_result.upper():
-                    st.success(f"✅ '{st.session_state.entity_name_for_report}' identified as a political entity. Proceeding with analysis.")
-                    
-                    # 2. Proceed with Political Analysis
-                    analysis_status_placeholder = st.empty()
-                    analysis_status_placeholder.info(f"📊 Performing detailed analysis for '{st.session_state.entity_name_for_report}'...")
-
-                    end_date_val = date.today()
-                    # Define comparison period (e.g., 5-10 days before the start_date_input)
-                    # For simplicity, let's make it a fixed 7 days before the start date, for a 7-day window
-                    comparison_end_date_val = st.session_state.start_date_for_report - timedelta(days=1)
-                    comparison_start_date_val = comparison_end_date_val - timedelta(days=6) # 7 day window
-
-                    agents = create_political_agents(st.session_state.entity_name_for_report, llm, serper_tool)
-                    tasks = create_political_tasks(st.session_state.entity_name_for_report, agents, st.session_state.start_date_for_report, end_date_val, comparison_start_date_val, comparison_end_date_val)
-                    
-                    main_crew = Crew(
-                        agents=list(agents),
-                        tasks=tasks,
-                        process=Process.sequential, # Tasks will be executed one after another
-                        verbose=0, # Or 1 for more detailed console logs
-                        # memory=True, # Enable memory if agents need to recall past interactions in a longer conversation (not typical for sequential task execution)
-                        # embedder can be configured here if using memory with specific embedding needs
-                    )
-                    
-                    final_report = main_crew.kickoff()
-                    st.session_state.analysis_result = final_report
-                    analysis_status_placeholder.empty() # Clear analysis message
-
-                elif validation_result and "NON_POLITICAL" in validation_result.upper():
-                    st.error(f"⚠️ '{st.session_state.entity_name_for_report}' does not appear to be a recognized political entity. Please provide a valid political entity name.")
-                    st.session_state.analysis_result = None
-                else:
-                    st.warning(f"🤔 Could not definitively validate '{st.session_state.entity_name_for_report}' as a political entity. The validator agent returned: '{validation_result}'. Please provide a clear political entity name.")
-                    st.session_state.analysis_result = None
-
-            except Exception as e:
-                st.error(f"An error occurred during the process: {e}")
-                st.session_state.analysis_result = None
-            finally:
-                st.session_state.analysis_in_progress = False
-                st.rerun() # Rerun to update UI based on results or errors
-
-    # Display results if available and not in progress
-    if not st.session_state.analysis_in_progress and st.session_state.analysis_result:
-        st.subheader(f"📊 Analysis Report for: {st.session_state.entity_name_for_report}")
-        st.markdown(f"**Analysis Period:** {st.session_state.start_date_for_report.strftime('%B %d, %Y')} to {date.today().strftime('%B %d, %Y')}")
         
+        with st.expander("🔑 API Keys & Web Search Setup (Optional)", expanded=False):
+            st.caption("Provide API keys if you want to use OpenAI models or enable web search via Serper.")
+            default_openai_key = os.environ.get("OPENAI_API_KEY", "")
+            default_serper_key = os.environ.get("SERPER_API_KEY", "")
+            
+            openai_api_key_input_exp = st.text_input(
+                "OpenAI API Key", type="password", value=default_openai_key,
+                help="Needed for GPT models. Can also be set as OPENAI_API_KEY environment variable.",
+                key="openai_api_key_exp_v2" 
+            )
+            serper_api_key_input_exp = st.text_input(
+                "Serper API Key", type="password", value=default_serper_key,
+                help="Needed for web search. Can also be set as SERPER_API_KEY environment variable.",
+                key="serper_api_key_exp_v2" 
+            )
+
+            if serper_api_key_input_exp: 
+                if 'serper_initialized' not in st.session_state or \
+                   not st.session_state.get('serper_initialized', False) or \
+                   st.session_state.get('serper_key_used') != serper_api_key_input_exp:
+                    with st.spinner("Initializing Serper..."):
+                        initialize_serper_tool(serper_api_key_input_exp) 
+                        st.session_state.serper_key_used = serper_api_key_input_exp 
+                        if st.session_state.get('serper_initialized'):
+                            st.success("SerperDevTool active!")
+            elif not serper_api_key_input_exp and default_serper_key and not st.session_state.get('serper_initialized_with_env', False):
+                with st.spinner("Trying Serper with .env key..."):
+                    if initialize_serper_tool(default_serper_key):
+                        st.session_state.serper_initialized_with_env = True
+                        st.session_state.serper_key_used = default_serper_key
+                        st.success("SerperDevTool active (using .env key)!")
+                    else:
+                        st.session_state.serper_initialized_with_env = True 
+            elif not serper_api_key_input_exp and not default_serper_key:
+                 st.caption("Serper API key not provided. Web search disabled.")
+        
+        st.markdown("---") 
+        generate_button = st.button("🚀 Generate Report", type="primary", use_container_width=True, disabled=st.session_state.get('analysis_running', False))
+
+    if 'analysis_result' not in st.session_state: st.session_state.analysis_result = None
+    if 'analysis_running' not in st.session_state: st.session_state.analysis_running = False
+
+    openai_api_key_to_use = openai_api_key_input_exp if 'openai_api_key_input_exp' in locals() and openai_api_key_input_exp else default_openai_key
+
+    if generate_button: 
+        valid_input = True
+        if not entity_name_input.strip():
+            st.sidebar.error("❌ Entity name required.") 
+            valid_input = False
+        if not start_date_input:
+            st.sidebar.error("❌ Start date required.") 
+            valid_input = False
+        
+        if selected_llm == "GPT-4o-mini (OpenAI)" and not openai_api_key_to_use:
+            st.sidebar.error("❌ OpenAI Key needed for GPT.") 
+            valid_input = False
+        
+        serper_key_available = bool(serper_api_key_input_exp or default_serper_key)
+        if not st.session_state.get('serper_initialized', False) : 
+            if serper_key_available :
+                 st.sidebar.warning("⚠️ Serper key issue. Check expander or .env.")
+        
+        if valid_input and selected_llm:
+            st.session_state.analysis_result = None
+            st.session_state.analysis_running = True
+            st.rerun()
+
+    if st.session_state.analysis_running:
+        with st.status("🤖 PoliScanSight Crew at Work...", expanded=True) as status_ui:
+            st.write("Initializing Language Model...")
+            llm_instance = create_llm(selected_llm, openai_api_key_to_use) 
+
+            if llm_instance:
+                st.write(f"🧠 Using {selected_llm}.")
+                
+                current_serper_key_for_run = serper_api_key_input_exp if 'serper_api_key_input_exp' in locals() and serper_api_key_input_exp else default_serper_key
+                if current_serper_key_for_run and not st.session_state.get('serper_initialized', False):
+                    st.write("🛠️ Attempting Serper Tool initialization for run...")
+                    initialize_serper_tool(current_serper_key_for_run)
+                
+                if not st.session_state.get('serper_initialized', False) and current_serper_key_for_run:
+                     st.write("⚠️ Serper tool could not be initialized. Proceeding with limited/no web search.")
+                elif not current_serper_key_for_run:
+                     st.write("ℹ️ No Serper API key provided. Web search disabled.")
+                else: 
+                     st.write("🛠️ Serper tool active.")
+
+                st.write("🛠️ Preparing analysis parameters and agents...")
+                user_start_date_obj = start_date_input 
+                current_date_obj = date.today()
+                current_date_str_param = current_date_obj.strftime("%Y-%m-%d")
+                start_date_str_param = user_start_date_obj.strftime("%Y-%m-%d")
+                past_sentiment_start_obj = user_start_date_obj - timedelta(days=10)
+                past_sentiment_end_obj = user_start_date_obj - timedelta(days=5)
+                past_sentiment_start_str_param = past_sentiment_start_obj.strftime("%Y-%m-%d")
+                past_sentiment_end_str_param = past_sentiment_end_obj.strftime("%Y-%m-%d")
+
+                agents_list = create_political_agents(entity_name_input, llm_instance) 
+                tasks_list = create_political_tasks(
+                    entity_name_input, agents_list, start_date_str_param,
+                    current_date_str_param, past_sentiment_start_str_param, past_sentiment_end_str_param
+                )
+                crew_instance = Crew(
+                    agents=agents_list, tasks=tasks_list, process=Process.sequential, verbose=True
+                )
+                st.write(f"🚀 Launching analysis for **{entity_name_input}** from **{start_date_str_param}** to **{current_date_str_param}**...")
+                st.caption("Detailed logs appear in terminal if `verbose=True`.")
+
+                final_report_str = "Analysis failed or produced no output."
+                try:
+                    result = crew_instance.kickoff()
+                    if result:
+                        if isinstance(result, str): final_report_str = result
+                        elif hasattr(result, 'raw') and result.raw: final_report_str = result.raw
+                        elif hasattr(result, 'tasks_output') and result.tasks_output:
+                             last_task_output = result.tasks_output[-1]
+                             if hasattr(last_task_output, 'raw_output'): final_report_str = last_task_output.raw_output
+                             elif hasattr(last_task_output, 'result'): final_report_str = str(last_task_output.result)
+                             else: final_report_str = str(last_task_output)
+                        else: final_report_str = str(result)
+
+                        st.session_state.analysis_result = final_report_str
+                        status_ui.update(label="✅ Political Analysis Completed!", state="complete", expanded=False)
+
+                        report_file_name = f"{entity_name_input.replace(' ', '_').lower()}_report_{start_date_str_param}_to_{current_date_str_param}.md"
+                        try:
+                            with open(report_file_name, "w", encoding="utf-8") as f:
+                                f.write(f"# Comprehensive Political Analysis & Strategic Advisory: {entity_name_input} (Analysis Period: {start_date_str_param} to {current_date_str_param})\n\n")
+                                f.write(final_report_str)
+                            st.info(f"📄 Report also saved locally as: {report_file_name}")
+                        except Exception as e:
+                            st.error(f"Error saving report to file: {e}")
+                    else:
+                        st.error("Analysis completed but no output was generated by the crew.")
+                        st.session_state.analysis_result = "No output was generated by the crew."
+                        status_ui.update(label="⚠️ Analysis completed with no output.", state="error", expanded=True)
+
+                except Exception as e:
+                    st.error(f"An error occurred during the analysis: {str(e)}")
+                    import traceback
+                    st.text_area("Error Traceback:", traceback.format_exc(), height=300)
+                    st.session_state.analysis_result = f"Political analysis failed: {str(e)}"
+                    status_ui.update(label="❌ Analysis Failed!", state="error", expanded=True)
+            else:
+                st.error("LLM could not be initialized. Check API keys and LLM selection.")
+                status_ui.update(label="❌ LLM Initialization Failed!", state="error", expanded=True)
+
+            st.session_state.analysis_running = False
+            st.rerun()
+
+    if st.session_state.analysis_result:
+        st.markdown("---") 
+        st.header("📜 Generated Report") 
+        
+        # General Disclaimer about URLs
         st.info(
             "📌 **Note on Source URLs:** This report includes URLs to support its findings. While the AI strives to provide accurate and relevant links, "
             "some URLs may be illustrative, lead to broader context pages, or occasionally be placeholders if a highly specific source for every "
@@ -456,8 +468,8 @@ def run_app():
         with st.expander("View Full Report", expanded=True):
             st.markdown(st.session_state.analysis_result)
         
-        report_data_for_download = f"# Comprehensive Political Analysis & Strategic Advisory: {st.session_state.entity_name_for_report} (Analysis Period: {st.session_state.start_date_for_report.strftime('%Y-%m-%d')} to {date.today().strftime('%Y-%m-%d')})\n\n{st.session_state.analysis_result}"
-        download_file_name = f"{st.session_state.entity_name_for_report.replace(' ', '_').lower()}_report_{st.session_state.start_date_for_report.strftime('%Y-%m-%d')}_to_{date.today().strftime('%Y-%m-%d')}.md"
+        report_data_for_download = f"# Comprehensive Political Analysis & Strategic Advisory: {entity_name_input} (Analysis Period: {start_date_input.strftime('%Y-%m-%d')} to {date.today().strftime('%Y-%m-%d')})\n\n{st.session_state.analysis_result}"
+        download_file_name = f"{entity_name_input.replace(' ', '_').lower()}_report_{start_date_input.strftime('%Y-%m-%d')}_to_{date.today().strftime('%Y-%m-%d')}.md"
         st.download_button(
             label="📥 Download Report as Markdown",
             data=report_data_for_download,
@@ -471,5 +483,5 @@ def run_app():
 
 # --- Main Execution with Password Check ---
 if __name__ == "__main__":
-    if check_password(): # Check password first
+    if check_password():
         run_app()
